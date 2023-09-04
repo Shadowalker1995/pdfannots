@@ -1,14 +1,13 @@
-from collections import defaultdict
 import logging
 import textwrap
 import typing as typ
 
 from . import Printer
-from ..types import RGB, AnnotationType, Pos, Annotation, Document
+from ..types import AnnotationType, Pos, Annotation, Document
 
 logger = logging.getLogger('pdfannots')
 
-MAX_CONTEXT_WORDS = 10
+MAX_CONTEXT_WORDS = 256
 """Maximum number of words returned by trim_context."""
 
 FALLBACK_CONTEXT_WORDS = 4
@@ -19,13 +18,13 @@ CONTEXT_BOUNDARIES = [
     ('. ', False, True),  # sentence boundary
     ('! ', False, True),
     ('? ', False, True),
-    (': ', False, False),
-    ('; ', False, False),
-    ('" ', False, True),   # end of quote
-    (' "', True, False),   # start of quote
-    (') ', False, True),   # end of parenthesis
-    (' (', True, False),   # start of parenthesis
-    ('—', False, False),   # em dash
+    # (': ', False, False),
+    # ('; ', False, False),
+    # ('" ', False, True),   # end of quote
+    # (' "', True, False),   # start of quote
+    # (') ', False, True),   # end of parenthesis
+    # (' (', True, False),   # start of parenthesis
+    # ('—', False, False),   # em dash
 ]
 """Rough approximation of natural boundaries in writing, used when searching for context."""
 
@@ -81,6 +80,8 @@ class MarkdownPrinter(Printer):
     BULLET_INDENT1 = " * "
     BULLET_INDENT2 = "   "
     QUOTE_INDENT = BULLET_INDENT2 + "> "
+    SO_WORDS = []
+    UL_WORDS = []
 
     def __init__(
         self,
@@ -88,13 +89,11 @@ class MarkdownPrinter(Printer):
         condense: bool = True,                  # Permit use of the condensed format
         print_filename: bool = False,           # Whether to print file names
         remove_hyphens: bool = True,            # Whether to remove hyphens across a line break
-        use_page_labels: bool = True,           # Whether to use page labels
         wrap_column: typ.Optional[int] = None,  # Column at which output is word-wrapped
         **kwargs: typ.Any                       # Other args, ignored
     ) -> None:
         self.print_filename = print_filename
         self.remove_hyphens = remove_hyphens
-        self.use_page_labels = use_page_labels
         self.wrap_column = wrap_column
         self.condense = condense
 
@@ -139,11 +138,10 @@ class MarkdownPrinter(Printer):
     @staticmethod
     def format_pos(
         pos: Pos,
-        document: Document,
-        use_page_label: bool
+        document: Document
     ) -> str:
 
-        result = pos.page.format_name(use_label=use_page_label).title()
+        result = str(pos.page).title()
 
         o = document.nearest_outline(pos)
         if o:
@@ -180,7 +178,7 @@ class MarkdownPrinter(Printer):
 
             # emit a paragraph break
             # if we're going straight to a quote, we don't need an extra newline
-            ret = ret + ('\n' if quote and npara == quotepos else '\n\n')
+            ret = ret + ('\n\n' if quote and npara <= quotepos else '\n'+ self.QUOTE_INDENT+ '\n')
 
             if self.wrap_column:
                 tw = self.quote_tw if inquote else self.bullet_tw2
@@ -193,8 +191,8 @@ class MarkdownPrinter(Printer):
 
         return ret
 
-    def merge_strikeout_context(self, annot: Annotation, text: str) -> str:
-        """Merge the context for a strikeout annotation into the text."""
+    def merge_context(self, annot: Annotation, text: str) -> str:
+        """Merge the context for an annotation into the text."""
         (pre, post) = annot.get_context(self.remove_hyphens)
 
         if pre:
@@ -203,23 +201,61 @@ class MarkdownPrinter(Printer):
         if post:
             post = trim_context(post, keep_right=False)
 
-        return pre + '~~' + text + '~~' + post
+        return pre + text + post
+    
+    def sub_text(self, text: str, so_words: list, ul_words: list) -> str:
+        """substitute each word of words with <u>word</u> or ~~word~~ in text"""
+        words = so_words + ul_words
+        words_deco = ["~~" + word + "~~" for word in so_words]\
+            + ["<u>" + word + "</u>" for word in ul_words]
+        for word, word_deco in zip(words, words_deco):
+            text = text.replace(word, word_deco)
+        return text
 
     def format_annot(
         self,
         annot: Annotation,
         document: Document,
-        extra: typ.Optional[str] = None
+        extra: typ.Optional[str] = None,
+        next_annot: Annotation = None
     ) -> str:
 
         # capture item text and contents (i.e. the comment), and split the latter into paragraphs
         text = annot.gettext(self.remove_hyphens) or ''
+        next_text = next_annot.gettext(self.remove_hyphens) or ''\
+            if next_annot else None
         comment = ([l for l in annot.contents.splitlines() if l]
                    if annot.contents else [])
 
         if annot.has_context():
-            assert annot.subtype == AnnotationType.StrikeOut
-            text = self.merge_strikeout_context(annot, text)
+            assert annot.subtype in [AnnotationType.StrikeOut, AnnotationType.Underline]
+            if next_annot:
+                assert next_annot.subtype in [AnnotationType.StrikeOut, AnnotationType.Underline]
+            if annot.subtype is AnnotationType.StrikeOut:
+                text_deco = "~~" + text + "~~"
+            if annot.subtype is AnnotationType.Underline:
+                text_deco = "<u>" + text + "</u>"
+
+            text_merged = self.merge_context(annot, text)
+            next_text_merged = self.merge_context(next_annot, next_text)\
+                if next_text else None
+            
+            text_merged_deco = self.merge_context(annot, text_deco)
+            
+            # if the next text with context merged is same with the current text
+            # with context merged, then do not output the current text
+            if (next_text_merged and text_merged == next_text_merged):
+                if annot.subtype is AnnotationType.StrikeOut:
+                    self.SO_WORDS.append(text)
+                if annot.subtype is AnnotationType.Underline:
+                    self.UL_WORDS.append(text)
+                text = " "
+            # output the current text with all of the annotation words decorated
+            # properly
+            else:
+                text = self.sub_text(text_merged_deco, self.SO_WORDS, self.UL_WORDS) if (self.SO_WORDS or self.UL_WORDS) else text_merged_deco
+                self.SO_WORDS.clear()
+                self.UL_WORDS.clear()
 
         # we are either printing: item text and item contents, or one of the two
         # if we see an annotation with neither, something has gone wrong
@@ -230,19 +266,17 @@ class MarkdownPrinter(Printer):
 
         # compute the formatted position (and extra bit if needed) as a label
         assert annot.pos is not None
-        label = self.format_pos(annot.pos, document, self.use_page_labels) + \
-            (" " + extra if extra else "") + ":"
+        label = self.format_pos(annot.pos, document) + \
+            (" " + extra if extra else "")
 
-        # If we have short (few words) text with a short or no comment, and the
-        # text contains no embedded full stops or quotes, then we'll just put
-        # quotation marks around the text and merge the two into a single paragraph.
+        # For Highlights, if we have one line text with one line or no comment,
+        # then we'll just bold the text and merge the two into a single paragraph.
         if (self.condense
             and text
-            and not annot.has_context()
-            and len(text.split()) <= 10  # words
-            and all([x not in text for x in ['"', '. ']])
-                and (not comment or len(comment) == 1)):
-            msg = label + ' "' + text + '"'
+            and not annot.has_context()  # just for Highlights
+            and len(text.splitlines()) == 1  # one line
+            and (not comment or len(comment) == 1)):
+            msg = label + ' **' + text + '**'
             if comment:
                 msg = msg + ' -- ' + comment[0]
             return self.format_bullet([msg]) + "\n\n"
@@ -252,13 +286,31 @@ class MarkdownPrinter(Printer):
         elif comment and not text and len(comment) == 1:
             msg = label + " " + comment[0]
             return self.format_bullet([msg]) + "\n\n"
+        
+        # For StrikeOut and Underline, if we have text with a short or no comment,
+        # then we'll just bold the text and merge the two into a single paragraph,
+        # and turns the text (if any) into a blockquote;
+        # if we have text with multi lines comment, then we put the comment into
+        # subsequent paragraphs, and turns the text (if any) into a blockquote.
+        elif (annot.has_context()):
+            if (not comment or len(comment) == 1):
+                label = label + ' -- ' + comment[0] if comment else label
+                msgparas = [label] + [text] if text != " " else [label]
+                quote = (1, 1) if text and text!=" " else None
+            else:
+                msgparas = [label] + comment + [text]
+                quotepos = len(comment)+1 if comment else 1
+                quote = (quotepos, 1) if text else None
+            return self.format_bullet(msgparas, quote) + "\n\n"
 
-        # Otherwise, text (if any) turns into a blockquote, and the comment (if
-        # any) into subsequent paragraphs.
+        # Otherwise, bold the text (if any) and put it into a subsequent
+        # paragraph, turns the comment (if any) into a blockquote.
         else:
+            text = "**"+text+"**"
             msgparas = [label] + [text] + comment
-            quotepos = (1, 1) if text else None
-            return self.format_bullet(msgparas, quotepos) + "\n\n"
+            quotelen = len(comment) if comment else 0
+            quote = (2, quotelen) if text else None
+            return self.format_bullet(msgparas, quote) + "\n\n"
 
     def emit_body(
         self,
@@ -277,12 +329,10 @@ class GroupedMarkdownPrinter(MarkdownPrinter):
         self,
         *,
         sections: typ.Sequence[str] = ALL_SECTIONS,  # controls the order of sections output
-        group_highlights_by_color: bool = False,     # Whether to group highlights by color
         **kwargs: typ.Any                            # other args -- see superclass
     ) -> None:
         super().__init__(**kwargs)
         self.sections = sections
-        self.group_highlights_by_color = group_highlights_by_color
         self._fmt_header_called: bool
 
     def emit_body(
@@ -292,52 +342,27 @@ class GroupedMarkdownPrinter(MarkdownPrinter):
 
         self._fmt_header_called = False
 
-        def fmt_header(name: str, level: int = 2) -> str:
-            """
-            A function that formats a header with a given name and level.
-
-            Parameters:
-                name (str): The name of the header.
-                level (int, optional): The level of the header. Defaults to 2.
-
-            Returns:
-                str: The formatted header.
-            """
+        def fmt_header(name: str) -> str:
             # emit blank separator line if needed
             prefix = '\n' if self._fmt_header_called else ''
             self._fmt_header_called = True
-            header = '#' * level
-            return prefix + header + " " + name + "\n"
+            return prefix + "## " + name + "\n\n"
 
         # Partition annotations into nits, comments, and highlights.
         nits = []
         comments = []
-        highlights = []  # When grouping by color, this holds only the undefined annotations
-        highlights_by_color: typ.DefaultDict[RGB, typ.List[Annotation]] = defaultdict(list)
-
+        highlights = []
         for a in document.iter_annots():
             if a.subtype in self.ANNOT_NITS:
                 nits.append(a)
             elif a.contents:
                 comments.append(a)
             elif a.subtype == AnnotationType.Highlight:
-                if self.group_highlights_by_color and a.color:
-                    highlights_by_color[a.color].append(a)
-                else:
-                    highlights.append(a)
+                highlights.append(a)
 
         for secname in self.sections:
-            if (highlights or highlights_by_color) and secname == 'highlights':
+            if highlights and secname == 'highlights':
                 yield fmt_header("Highlights")
-
-                for color, annots in highlights_by_color.items():
-                    yield fmt_header(f"Color: {color.ashex()}", level=3)
-                    for a in annots:
-                        yield self.format_annot(a, document)
-
-                if highlights and self.group_highlights_by_color:
-                    yield fmt_header("Color: undefined", level=3)
-
                 for a in highlights:
                     yield self.format_annot(a, document)
 
@@ -347,7 +372,13 @@ class GroupedMarkdownPrinter(MarkdownPrinter):
                     yield self.format_annot(a, document)
 
             if nits and secname == 'nits':
-                yield fmt_header("Nits")
-                for a in nits:
-                    extra = "suggested deletion" if a.subtype == AnnotationType.StrikeOut else None
-                    yield self.format_annot(a, document, extra)
+                yield fmt_header("Corpus")
+                for i, a in enumerate(nits):
+                    next_a = nits[i+1] if i<=len(nits)-2 else None
+                    if a.subtype is AnnotationType.StrikeOut:
+                        extra = "~~"+a.gettext(self.remove_hyphens)+"~~"
+                    elif a.subtype is AnnotationType.Underline:
+                        extra = "**"+a.gettext(self.remove_hyphens)+"**"
+                    else:
+                        None
+                    yield self.format_annot(a, document, extra, next_a)

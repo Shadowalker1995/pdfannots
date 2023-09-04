@@ -131,10 +131,7 @@ class Page:
         return '<Page #%d>' % self.pageno  # zero-based page index
 
     def __str__(self) -> str:
-        return self.format_name()
-
-    def format_name(self, use_label: bool = True) -> str:
-        if self.label and use_label:
+        if self.label:
             return 'page %s' % self.label
         else:
             # + 1 for 1-based page numbers in normal program output (error messages, etc.)
@@ -279,7 +276,6 @@ class Annotation(ObjectWithPos):
         text         Text in the order captured (use gettext() for a cleaner form)
         author       Author of the annotation
         created      Timestamp the annotation was created
-        color        RGB color of the annotation
         last_charseq Sequence number of the most recent character in text
 
     Attributes updated only for StrikeOut annotations:
@@ -301,8 +297,7 @@ class Annotation(ObjectWithPos):
             rect: typ.Optional[BoxCoords] = None,
             contents: typ.Optional[str] = None,
             author: typ.Optional[str] = None,
-            created: typ.Optional[datetime.datetime] = None,
-            color: typ.Optional[RGB] = None):
+            created: typ.Optional[datetime.datetime] = None):
 
         # Construct boxes from quadpoints
         boxes = []
@@ -329,7 +324,6 @@ class Annotation(ObjectWithPos):
         self.author = author
         self.created = created
         self.text = []
-        self.color = color
         self.pre_context = None
         self.post_context = None
         self.boxes = boxes
@@ -363,7 +357,7 @@ class Annotation(ObjectWithPos):
 
     def wants_context(self) -> bool:
         """Returns true if this annotation type should include context."""
-        return self.subtype == AnnotationType.StrikeOut
+        return self.subtype in [AnnotationType.StrikeOut, AnnotationType.Underline]
 
     def set_pre_context(self, pre_context: str) -> None:
         assert self.pre_context is None
@@ -485,19 +479,3 @@ class Document:
                 return page.outlines[idx - 1]
 
         return None
-
-
-class RGB(typ.NamedTuple):
-    red: float
-    green: float
-    blue: float
-
-    def ashex(self) -> str:
-        "Return a 6-character string representing the 24-bit hex code for this colour."
-        red_hex = format(int(self.red * 255), '02x')
-        green_hex = format(int(self.green * 255), '02x')
-        blue_hex = format(int(self.blue * 255), '02x')
-        return red_hex + green_hex + blue_hex
-
-    def __str__(self) -> str:
-        return f"RGB({self.ashex()})"
